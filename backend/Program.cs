@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using System.Text;
 using backend.Data;
 using backend.Middleware;
@@ -25,6 +26,15 @@ else if (!builder.Environment.IsDevelopment())
 {
     builder.WebHost.UseUrls("http://0.0.0.0:8080");
 }
+
+// ============================================================
+// WEB ROOT & UPLOADS DIRECTORY
+// ============================================================
+
+var webRootPath = Path.Combine(builder.Environment.ContentRootPath, "wwwroot");
+var uploadsPath = Path.Combine(webRootPath, "uploads", "claims");
+Directory.CreateDirectory(uploadsPath);
+builder.Environment.WebRootPath = webRootPath;
 
 // ============================================================
 // DATABASE
@@ -58,8 +68,6 @@ builder.Services.AddControllers();
 
 // ============================================================
 // HTTP / CORS
-// Read allowed origins from configuration / environment variable
-// so it can accept the deployed frontend URL.
 // ============================================================
 
 var corsEnv = builder.Configuration["ALLOWED_CORS_ORIGINS"]
@@ -81,7 +89,7 @@ else
         {
             "http://localhost:5173",
             "http://localhost:3000",
-            "http://localhost:4173"   // vite preview
+            "http://localhost:4173"
         };
 }
 
@@ -109,21 +117,20 @@ builder.Services.AddCors(options =>
 
 // ============================================================
 // JWT AUTHENTICATION
-// Environment variables: JWT_KEY, JWT_SECRET, JWT_ISSUER, JWT_AUDIENCE, or Jwt section
 // ============================================================
 
-var jwtKey = builder.Configuration["JWT_KEY"]
+var jwtKey = (builder.Configuration["JWT_KEY"]
              ?? builder.Configuration["JWT_SECRET"]
              ?? builder.Configuration["Jwt:Key"]
-             ?? throw new InvalidOperationException("JWT Key is missing.");
+             ?? throw new InvalidOperationException("JWT Key is missing.")).Trim();
 
-var jwtIssuer = builder.Configuration["JWT_ISSUER"]
+var jwtIssuer = (builder.Configuration["JWT_ISSUER"]
                ?? builder.Configuration["Jwt:Issuer"]
-               ?? throw new InvalidOperationException("JWT Issuer is missing.");
+               ?? throw new InvalidOperationException("JWT Issuer is missing.")).Trim();
 
-var jwtAudience = builder.Configuration["JWT_AUDIENCE"]
+var jwtAudience = (builder.Configuration["JWT_AUDIENCE"]
                  ?? builder.Configuration["Jwt:Audience"]
-                 ?? throw new InvalidOperationException("JWT Audience is missing.");
+                 ?? throw new InvalidOperationException("JWT Audience is missing.")).Trim();
 
 builder.Services
     .AddAuthentication(
@@ -147,34 +154,24 @@ builder.Services
 
                 ValidateLifetime = true,
 
-                ClockSkew = TimeSpan.Zero
+                ClockSkew = TimeSpan.Zero,
+
+                NameClaimType = ClaimTypes.NameIdentifier,
+                RoleClaimType = ClaimTypes.Role
             };
     });
 
 builder.Services.AddAuthorization();
 
 // ============================================================
-// REPOSITORIES
+// REPOSITORIES & SERVICES
 // ============================================================
 
-builder.Services.AddScoped<
-    IUserRepository,
-    UserRepository>();
-
-builder.Services.AddScoped<
-    IClaimRepository,
-    ClaimRepository>();
-
-// ============================================================
-// SERVICES
-// ============================================================
-
+builder.Services.AddScoped<IUserRepository, UserRepository>();
+builder.Services.AddScoped<IClaimRepository, ClaimRepository>();
 builder.Services.AddScoped<AuthService>();
-
 builder.Services.AddScoped<ClaimService>();
-
 builder.Services.AddScoped<ValidationService>();
-
 builder.Services.AddScoped<NotificationService>();
 
 // ============================================================
@@ -191,8 +188,7 @@ builder.Services.AddSwaggerGen(options =>
         {
             Title = "UPS Smart Claims API",
             Version = "v1",
-            Description =
-                "Smart Package Dispute & Claims Dashboard API"
+            Description = "Smart Package Dispute & Claims Dashboard API"
         });
 
     options.AddSecurityDefinition(
@@ -204,8 +200,7 @@ builder.Services.AddSwaggerGen(options =>
             Scheme = "bearer",
             BearerFormat = "JWT",
             In = ParameterLocation.Header,
-            Description =
-                "Enter JWT token as: Bearer {token}"
+            Description = "Enter JWT token as: Bearer {token}"
         });
 
     options.AddSecurityRequirement(
@@ -217,8 +212,7 @@ builder.Services.AddSwaggerGen(options =>
                     Reference =
                         new OpenApiReference
                         {
-                            Type =
-                                ReferenceType.SecurityScheme,
+                            Type = ReferenceType.SecurityScheme,
                             Id = "Bearer"
                         }
                 },
@@ -235,8 +229,6 @@ var app = builder.Build();
 
 // ============================================================
 // ASYNC DATABASE SEEDING & MIGRATION WITH RETRY
-// Non-blocking background initialization so Kestrel starts
-// listening on TCP port 0.0.0.0 immediately.
 // ============================================================
 
 _ = Task.Run(async () =>
@@ -263,11 +255,10 @@ _ = Task.Run(async () =>
             logger.LogWarning(ex, "Database migration/seeding attempt {Retry}/{MaxRetries} failed: {Message}", retry, maxRetries, ex.Message);
             if (retry == maxRetries)
             {
-                logger.LogError(ex, "All {MaxRetries} database migration/seeding attempts failed. Application will continue serving requests.", maxRetries);
+                logger.LogError(ex, "All {MaxRetries} database migration/seeding attempts failed.", maxRetries);
             }
             else
             {
-                logger.LogInformation("Waiting {DelaySeconds} seconds before retry...", delaySeconds);
                 await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
             }
         }
@@ -275,15 +266,9 @@ _ = Task.Run(async () =>
 });
 
 // ============================================================
-// MIDDLEWARE ORDER (ORDER MATTERS)
-//
-// CORS must come before static files so that the
-// Access-Control-Allow-Origin header is present on
-// every response, including image file responses.
-// Without this images will be blocked by browsers.
+// MIDDLEWARE ORDER
 // ============================================================
 
-// Enable Swagger in all environments (including Railway Production)
 app.UseSwagger();
 app.UseSwaggerUI(c =>
 {
@@ -291,40 +276,21 @@ app.UseSwaggerUI(c =>
     c.RoutePrefix = "swagger";
 });
 
-// 1. Exception handler first
 app.UseMiddleware<ExceptionMiddleware>();
 
-// 2. CORS before everything that produces responses
 app.UseCors("FrontendPolicy");
 
-// 3. Ensure the uploads directory exists
-var wwwrootPath = app.Environment.WebRootPath
-                  ?? Path.Combine(app.Environment.ContentRootPath, "wwwroot");
-
-var uploadsPath = Path.Combine(
-    wwwrootPath,
-    "uploads",
-    "claims");
-
-Directory.CreateDirectory(uploadsPath);
-
-// 4. Serve wwwroot static files (CSS, JS, images, etc.)
 app.UseStaticFiles(new StaticFileOptions
 {
-    FileProvider = new PhysicalFileProvider(wwwrootPath),
+    FileProvider = new PhysicalFileProvider(webRootPath),
     RequestPath = "",
     ContentTypeProvider = BuildContentTypeProvider(),
 });
 
-// 5. Authentication & Authorization
 app.UseAuthentication();
-
 app.UseAuthorization();
 
-// Root URL redirect to Swagger UI
 app.MapGet("/", () => Results.Redirect("/swagger"));
-
-// 6. Controllers
 app.MapControllers();
 
 // ============================================================
@@ -339,7 +305,6 @@ app.Run();
 
 static string GetDatabaseConnectionString(IConfiguration configuration, ILogger logger)
 {
-    // Priority 1: Check MySQL URL environment variables (Railway standard link)
     var mysqlUrl = configuration["MYSQL_URL"]
                    ?? configuration["MYSQLPRIVATEURL"]
                    ?? configuration["MYSQL_PRIVATE_URL"]
@@ -352,7 +317,6 @@ static string GetDatabaseConnectionString(IConfiguration configuration, ILogger 
         return ParseMysqlUrl(mysqlUrl, logger);
     }
 
-    // Priority 2: Check Railway's individual MySQL environment variables
     var host = configuration["MYSQLHOST"] ?? configuration["MYSQL_HOST"];
     var portStr = configuration["MYSQLPORT"] ?? configuration["MYSQL_PORT"];
     var user = configuration["MYSQLUSER"] ?? configuration["MYSQL_USER"];
@@ -373,7 +337,6 @@ static string GetDatabaseConnectionString(IConfiguration configuration, ILogger 
         return $"Server={host};Port={port};Database={database};Uid={user};Pwd={password ?? ""};AllowPublicKeyRetrieval=True;SslMode=Preferred;";
     }
 
-    // Priority 3: Check direct connection string variables or appsettings.json
     var connStr = configuration.GetConnectionString("DefaultConnection")
                   ?? configuration["MYSQL_CONNECTION_STRING"]
                   ?? configuration["DEFAULT_CONNECTION"]
@@ -381,7 +344,7 @@ static string GetDatabaseConnectionString(IConfiguration configuration, ILogger 
 
     if (string.IsNullOrWhiteSpace(connStr))
     {
-        throw new InvalidOperationException("MySQL connection string is missing. Please configure MYSQL_URL, MYSQLHOST/MYSQLUSER/MYSQLDATABASE, or ConnectionStrings__DefaultConnection.");
+        throw new InvalidOperationException("MySQL connection string is missing.");
     }
 
     if (connStr.StartsWith("mysql://", StringComparison.OrdinalIgnoreCase) ||
@@ -400,16 +363,10 @@ static string ParseMysqlUrl(string mysqlUrl, ILogger logger)
     {
         var raw = mysqlUrl;
         int schemeEnd = raw.IndexOf("://", StringComparison.Ordinal);
-        if (schemeEnd >= 0)
-        {
-            raw = raw.Substring(schemeEnd + 3);
-        }
+        if (schemeEnd >= 0) raw = raw.Substring(schemeEnd + 3);
 
         int queryIdx = raw.IndexOf('?');
-        if (queryIdx >= 0)
-        {
-            raw = raw.Substring(0, queryIdx);
-        }
+        if (queryIdx >= 0) raw = raw.Substring(0, queryIdx);
 
         int atIdx = raw.LastIndexOf('@');
         string userInfo = "";
@@ -455,10 +412,7 @@ static string ParseMysqlUrl(string mysqlUrl, ILogger logger)
         {
             host = hostPort.Substring(0, portColonIdx);
             string portStr = hostPort.Substring(portColonIdx + 1);
-            if (int.TryParse(portStr, out var p))
-            {
-                port = p;
-            }
+            if (int.TryParse(portStr, out var p)) port = p;
         }
 
         logger.LogInformation("Database Config: Parsed MySQL URL (Host: {Host}, Port: {Port}, DB: {Database}, User: {User}).",
@@ -468,7 +422,7 @@ static string ParseMysqlUrl(string mysqlUrl, ILogger logger)
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "Failed to parse MYSQL_URL. Falling back to default URI parser.");
+        logger.LogError(ex, "Failed to parse MYSQL_URL.");
         var uri = new Uri(mysqlUrl);
         var userInfo = uri.UserInfo.Split(new[] { ':' }, 2);
         var user = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : "";
@@ -511,21 +465,11 @@ static FileExtensionContentTypeProvider BuildContentTypeProvider()
 {
     var provider = new FileExtensionContentTypeProvider();
 
-    // Ensure common image types are served correctly
-    if (!provider.Mappings.ContainsKey(".jpg"))
-        provider.Mappings[".jpg"] = "image/jpeg";
-
-    if (!provider.Mappings.ContainsKey(".jpeg"))
-        provider.Mappings[".jpeg"] = "image/jpeg";
-
-    if (!provider.Mappings.ContainsKey(".png"))
-        provider.Mappings[".png"] = "image/png";
-
-    if (!provider.Mappings.ContainsKey(".webp"))
-        provider.Mappings[".webp"] = "image/webp";
-
-    if (!provider.Mappings.ContainsKey(".gif"))
-        provider.Mappings[".gif"] = "image/gif";
+    if (!provider.Mappings.ContainsKey(".jpg")) provider.Mappings[".jpg"] = "image/jpeg";
+    if (!provider.Mappings.ContainsKey(".jpeg")) provider.Mappings[".jpeg"] = "image/jpeg";
+    if (!provider.Mappings.ContainsKey(".png")) provider.Mappings[".png"] = "image/png";
+    if (!provider.Mappings.ContainsKey(".webp")) provider.Mappings[".webp"] = "image/webp";
+    if (!provider.Mappings.ContainsKey(".gif")) provider.Mappings[".gif"] = "image/gif";
 
     return provider;
 }

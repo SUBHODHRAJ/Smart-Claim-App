@@ -51,13 +51,13 @@ export function AuthProvider({ children }) {
 
 
   const login = async (credentials) => {
+    localStorage.clear();
     const response = await loginUser(credentials);
 
     const token =
       response?.token ||
       response?.data?.token;
 
-    // Handle both flat AuthResponse ({ userId, name, email, role, token }) and nested ({ user: {...} })
     const loggedInUser =
       response?.user ||
       response?.data?.user ||
@@ -87,9 +87,7 @@ export function AuthProvider({ children }) {
   };
 
   const logout = () => {
-    localStorage.removeItem("token");
-    localStorage.removeItem("authToken");
-    localStorage.removeItem("user");
+    localStorage.clear();
     setUser(null);
   };
 
