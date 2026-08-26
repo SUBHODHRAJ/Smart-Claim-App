@@ -276,12 +276,13 @@ using (var scope = app.Services.CreateScope())
 // Without this images will be blocked by browsers.
 // ============================================================
 
-if (app.Environment.IsDevelopment())
+// Enable Swagger in all environments (including Railway Production)
+app.UseSwagger();
+app.UseSwaggerUI(c =>
 {
-    app.UseSwagger();
-
-    app.UseSwaggerUI();
-}
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "UPS Smart Claims API v1");
+    c.RoutePrefix = "swagger";
+});
 
 // 1. Exception handler first
 app.UseMiddleware<ExceptionMiddleware>();
@@ -312,6 +313,9 @@ app.UseStaticFiles(new StaticFileOptions
 app.UseAuthentication();
 
 app.UseAuthorization();
+
+// Root URL redirect to Swagger UI
+app.MapGet("/", () => Results.Redirect("/swagger"));
 
 // 6. Controllers
 app.MapControllers();
