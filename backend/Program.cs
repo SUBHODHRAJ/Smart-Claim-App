@@ -13,12 +13,20 @@ using Microsoft.OpenApi.Models;
 var builder = WebApplication.CreateBuilder(args);
 
 // ============================================================
+// SERVER PORT & BINDING (For Railway / Production / Localhost)
+// ============================================================
+
+var port = Environment.GetEnvironmentVariable("PORT");
+if (!string.IsNullOrWhiteSpace(port))
+{
+    builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+}
+
+// ============================================================
 // DATABASE
 // ============================================================
 
-var connectionString =
-    builder.Configuration.GetConnectionString(
-        "DefaultConnection");
+var connectionString = GetDatabaseConnectionString(builder.Configuration);
 
 builder.Services.AddDbContext<ApplicationDbContext>(
     options =>
@@ -36,54 +44,72 @@ builder.Services.AddControllers();
 
 // ============================================================
 // HTTP / CORS
-// Read allowed origins from configuration so it is not
-// hardcoded for localhost in production.
+// Read allowed origins from configuration / environment variable
+// so it can accept the deployed frontend URL.
 // ============================================================
 
-var allowedOrigins =
-    builder.Configuration
+var corsEnv = builder.Configuration["ALLOWED_CORS_ORIGINS"]
+              ?? builder.Configuration["AllowedCorsOrigins"];
+
+string[] allowedOrigins;
+
+if (!string.IsNullOrWhiteSpace(corsEnv))
+{
+    allowedOrigins = corsEnv
+        .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+}
+else
+{
+    allowedOrigins = builder.Configuration
         .GetSection("AllowedCorsOrigins")
         .Get<string[]>()
-    ?? new[]
-    {
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://localhost:4173"   // vite preview
-    };
+        ?? new[]
+        {
+            "http://localhost:5173",
+            "http://localhost:3000",
+            "http://localhost:4173"   // vite preview
+        };
+}
 
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("FrontendPolicy", policy =>
     {
-        policy
-            .WithOrigins(allowedOrigins)
-            .AllowAnyHeader()
-            .AllowAnyMethod()
-            .AllowCredentials();
+        if (allowedOrigins.Length == 1 && allowedOrigins[0] == "*")
+        {
+            policy
+                .AllowAnyOrigin()
+                .AllowAnyHeader()
+                .AllowAnyMethod();
+        }
+        else
+        {
+            policy
+                .WithOrigins(allowedOrigins)
+                .AllowAnyHeader()
+                .AllowAnyMethod()
+                .AllowCredentials();
+        }
     });
 });
 
 // ============================================================
 // JWT AUTHENTICATION
+// Environment variables: JWT_KEY, JWT_SECRET, JWT_ISSUER, JWT_AUDIENCE, or Jwt section
 // ============================================================
 
-var jwtSettings =
-    builder.Configuration.GetSection("Jwt");
+var jwtKey = builder.Configuration["JWT_KEY"]
+             ?? builder.Configuration["JWT_SECRET"]
+             ?? builder.Configuration["Jwt:Key"]
+             ?? throw new InvalidOperationException("JWT Key is missing.");
 
-var jwtKey =
-    jwtSettings["Key"]
-    ?? throw new InvalidOperationException(
-        "JWT Key is missing.");
+var jwtIssuer = builder.Configuration["JWT_ISSUER"]
+               ?? builder.Configuration["Jwt:Issuer"]
+               ?? throw new InvalidOperationException("JWT Issuer is missing.");
 
-var jwtIssuer =
-    jwtSettings["Issuer"]
-    ?? throw new InvalidOperationException(
-        "JWT Issuer is missing.");
-
-var jwtAudience =
-    jwtSettings["Audience"]
-    ?? throw new InvalidOperationException(
-        "JWT Audience is missing.");
+var jwtAudience = builder.Configuration["JWT_AUDIENCE"]
+                 ?? builder.Configuration["Jwt:Audience"]
+                 ?? throw new InvalidOperationException("JWT Audience is missing.");
 
 builder.Services
     .AddAuthentication(
@@ -230,24 +256,22 @@ app.UseMiddleware<ExceptionMiddleware>();
 app.UseCors("FrontendPolicy");
 
 // 3. Ensure the uploads directory exists
+var wwwrootPath = app.Environment.WebRootPath
+                  ?? Path.Combine(app.Environment.ContentRootPath, "wwwroot");
+
 var uploadsPath = Path.Combine(
-    app.Environment.ContentRootPath,
-    "wwwroot",
+    wwwrootPath,
     "uploads",
     "claims");
 
 Directory.CreateDirectory(uploadsPath);
 
-// 4. Serve wwwroot static files (CSS, JS, etc.)
-//    Default UseStaticFiles() serves from wwwroot/
-//    This already covers /uploads/claims/** since
-//    they are inside wwwroot.
+// 4. Serve wwwroot static files (CSS, JS, images, etc.)
 app.UseStaticFiles(new StaticFileOptions
 {
-    // Enable serving of all files including images
+    FileProvider = new PhysicalFileProvider(wwwrootPath),
+    RequestPath = "",
     ContentTypeProvider = BuildContentTypeProvider(),
-    // Do NOT set OnPrepareResponse here — CORS middleware
-    // already added the correct headers above.
 });
 
 // 5. Authentication & Authorization
@@ -267,6 +291,48 @@ app.Run();
 // ============================================================
 // HELPERS
 // ============================================================
+
+static string GetDatabaseConnectionString(IConfiguration configuration)
+{
+    var connStr = configuration.GetConnectionString("DefaultConnection")
+                  ?? configuration["MYSQL_CONNECTION_STRING"]
+                  ?? configuration["DEFAULT_CONNECTION"]
+                  ?? configuration["ConnectionStrings:DefaultConnection"];
+
+    if (string.IsNullOrWhiteSpace(connStr))
+    {
+        connStr = configuration["MYSQL_URL"]
+                  ?? configuration["MYSQLPRIVATEURL"]
+                  ?? configuration["MYSQL_PRIVATE_URL"]
+                  ?? configuration["DATABASE_URL"];
+    }
+
+    if (string.IsNullOrWhiteSpace(connStr))
+    {
+        throw new InvalidOperationException("MySQL connection string is missing.");
+    }
+
+    if (connStr.StartsWith("mysql://", StringComparison.OrdinalIgnoreCase) ||
+        connStr.StartsWith("mysqli://", StringComparison.OrdinalIgnoreCase))
+    {
+        return ConvertMysqlUrlToConnectionString(connStr);
+    }
+
+    return connStr;
+}
+
+static string ConvertMysqlUrlToConnectionString(string mysqlUrl)
+{
+    var uri = new Uri(mysqlUrl);
+    var userInfo = uri.UserInfo.Split(':');
+    var user = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : "";
+    var password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
+    var host = uri.Host;
+    var port = uri.Port > 0 ? uri.Port : 3306;
+    var database = uri.AbsolutePath.TrimStart('/');
+
+    return $"Server={host};Port={port};Database={database};Uid={user};Pwd={password};";
+}
 
 static FileExtensionContentTypeProvider BuildContentTypeProvider()
 {
