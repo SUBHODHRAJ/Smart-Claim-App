@@ -26,14 +26,24 @@ if (!string.IsNullOrWhiteSpace(port))
 // DATABASE
 // ============================================================
 
-var connectionString = GetDatabaseConnectionString(builder.Configuration);
+using var startupLoggerFactory = LoggerFactory.Create(logBuilder => logBuilder.AddConsole());
+var startupLogger = startupLoggerFactory.CreateLogger("DatabaseSetup");
+
+var connectionString = GetDatabaseConnectionString(builder.Configuration, startupLogger);
 
 builder.Services.AddDbContext<ApplicationDbContext>(
     options =>
     {
         options.UseMySql(
             connectionString,
-            new MySqlServerVersion(new Version(8, 0, 36)));
+            new MySqlServerVersion(new Version(8, 0, 36)),
+            mySqlOptions =>
+            {
+                mySqlOptions.EnableRetryOnFailure(
+                    maxRetryCount: 5,
+                    maxRetryDelay: TimeSpan.FromSeconds(10),
+                    errorNumbersToAdd: null);
+            });
     });
 
 // ============================================================
@@ -220,7 +230,7 @@ builder.Services.AddSwaggerGen(options =>
 var app = builder.Build();
 
 // ============================================================
-// DATABASE SEEDING
+// DATABASE SEEDING & MIGRATION WITH RETRY
 // ============================================================
 
 using (var scope = app.Services.CreateScope())
@@ -229,6 +239,8 @@ using (var scope = app.Services.CreateScope())
     var logger = services.GetRequiredService<ILogger<Program>>();
 
     int maxRetries = 5;
+    int delaySeconds = 5;
+
     for (int retry = 1; retry <= maxRetries; retry++)
     {
         try
@@ -241,13 +253,16 @@ using (var scope = app.Services.CreateScope())
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Database migration/seeding attempt {Retry} failed: {Message}", retry, ex.Message);
+            logger.LogWarning(ex, "Database migration/seeding attempt {Retry}/{MaxRetries} failed: {Message}", retry, maxRetries, ex.Message);
             if (retry == maxRetries)
             {
-                logger.LogError(ex, "All database migration/seeding attempts failed.");
-                throw;
+                logger.LogError(ex, "All {MaxRetries} database migration/seeding attempts failed. Startup will continue so health endpoints are accessible.", maxRetries);
             }
-            await Task.Delay(3000);
+            else
+            {
+                logger.LogInformation("Waiting {DelaySeconds} seconds before retry...", delaySeconds);
+                await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
+            }
         }
     }
 }
@@ -311,13 +326,31 @@ app.Run();
 // HELPERS
 // ============================================================
 
-static string GetDatabaseConnectionString(IConfiguration configuration)
+static string GetDatabaseConnectionString(IConfiguration configuration, ILogger logger)
 {
+    // Strategy 1: Check Railway's individual MySQL environment variables
+    var host = configuration["MYSQLHOST"] ?? configuration["MYSQL_HOST"];
+    var portStr = configuration["MYSQLPORT"] ?? configuration["MYSQL_PORT"] ?? "3306";
+    var user = configuration["MYSQLUSER"] ?? configuration["MYSQL_USER"];
+    var password = configuration["MYSQLPASSWORD"] ?? configuration["MYSQL_PASSWORD"];
+    var database = configuration["MYSQLDATABASE"] ?? configuration["MYSQL_DATABASE"];
+
+    if (!string.IsNullOrWhiteSpace(host) && !string.IsNullOrWhiteSpace(user) && !string.IsNullOrWhiteSpace(database))
+    {
+        int port = int.TryParse(portStr, out var p) ? p : 3306;
+        logger.LogInformation("Database Config: Using Railway individual environment variables (Host: {Host}, Port: {Port}, DB: {Database}, User: {User}).",
+            host, port, database, MaskString(user));
+
+        return $"Server={host};Port={port};Database={database};Uid={user};Pwd={password ?? ""};AllowPublicKeyRetrieval=True;SslMode=Preferred;";
+    }
+
+    // Strategy 2: Check direct connection string variables
     var connStr = configuration.GetConnectionString("DefaultConnection")
                   ?? configuration["MYSQL_CONNECTION_STRING"]
                   ?? configuration["DEFAULT_CONNECTION"]
                   ?? configuration["ConnectionStrings:DefaultConnection"];
 
+    // Strategy 3: Check MySQL URL environment variables
     if (string.IsNullOrWhiteSpace(connStr))
     {
         connStr = configuration["MYSQL_URL"]
@@ -328,29 +361,130 @@ static string GetDatabaseConnectionString(IConfiguration configuration)
 
     if (string.IsNullOrWhiteSpace(connStr))
     {
-        throw new InvalidOperationException("MySQL connection string is missing.");
+        throw new InvalidOperationException("MySQL connection string is not configured. Please set MYSQLHOST/MYSQLUSER/MYSQLDATABASE, MYSQL_URL, or ConnectionStrings__DefaultConnection.");
     }
 
     if (connStr.StartsWith("mysql://", StringComparison.OrdinalIgnoreCase) ||
         connStr.StartsWith("mysqli://", StringComparison.OrdinalIgnoreCase))
     {
-        return ConvertMysqlUrlToConnectionString(connStr);
+        return ParseMysqlUrl(connStr, logger);
     }
 
+    LogDiagnosticConnStrInfo(connStr, logger);
     return connStr;
 }
 
-static string ConvertMysqlUrlToConnectionString(string mysqlUrl)
+static string ParseMysqlUrl(string mysqlUrl, ILogger logger)
 {
-    var uri = new Uri(mysqlUrl);
-    var userInfo = uri.UserInfo.Split(new[] { ':' }, 2);
-    var user = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : "";
-    var password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
-    var host = uri.Host;
-    var port = uri.Port > 0 ? uri.Port : 3306;
-    var database = uri.AbsolutePath.TrimStart('/');
+    try
+    {
+        var raw = mysqlUrl;
+        int schemeEnd = raw.IndexOf("://", StringComparison.Ordinal);
+        if (schemeEnd >= 0)
+        {
+            raw = raw.Substring(schemeEnd + 3);
+        }
 
-    return $"Server={host};Port={port};Database={database};Uid={user};Pwd={password};AllowPublicKeyRetrieval=True;SslMode=Preferred;";
+        int queryIdx = raw.IndexOf('?');
+        if (queryIdx >= 0)
+        {
+            raw = raw.Substring(0, queryIdx);
+        }
+
+        int atIdx = raw.LastIndexOf('@');
+        string userInfo = "";
+        string hostPortDb = raw;
+
+        if (atIdx >= 0)
+        {
+            userInfo = raw.Substring(0, atIdx);
+            hostPortDb = raw.Substring(atIdx + 1);
+        }
+
+        string user = "";
+        string password = "";
+        if (!string.IsNullOrEmpty(userInfo))
+        {
+            int colonIdx = userInfo.IndexOf(':');
+            if (colonIdx >= 0)
+            {
+                user = Uri.UnescapeDataString(userInfo.Substring(0, colonIdx));
+                password = Uri.UnescapeDataString(userInfo.Substring(colonIdx + 1));
+            }
+            else
+            {
+                user = Uri.UnescapeDataString(userInfo);
+            }
+        }
+
+        int slashIdx = hostPortDb.IndexOf('/');
+        string hostPort = hostPortDb;
+        string database = "";
+
+        if (slashIdx >= 0)
+        {
+            hostPort = hostPortDb.Substring(0, slashIdx);
+            database = Uri.UnescapeDataString(hostPortDb.Substring(slashIdx + 1));
+        }
+
+        string host = hostPort;
+        int port = 3306;
+
+        int portColonIdx = hostPort.LastIndexOf(':');
+        if (portColonIdx >= 0)
+        {
+            host = hostPort.Substring(0, portColonIdx);
+            string portStr = hostPort.Substring(portColonIdx + 1);
+            if (int.TryParse(portStr, out var p))
+            {
+                port = p;
+            }
+        }
+
+        logger.LogInformation("Database Config: Parsed MySQL URL (Host: {Host}, Port: {Port}, DB: {Database}, User: {User}).",
+            host, port, database, MaskString(user));
+
+        return $"Server={host};Port={port};Database={database};Uid={user};Pwd={password};AllowPublicKeyRetrieval=True;SslMode=Preferred;";
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to parse MYSQL_URL. Falling back to default URI parser.");
+        var uri = new Uri(mysqlUrl);
+        var userInfo = uri.UserInfo.Split(new[] { ':' }, 2);
+        var user = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : "";
+        var password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
+        var host = uri.Host;
+        var port = uri.Port > 0 ? uri.Port : 3306;
+        var database = uri.AbsolutePath.TrimStart('/');
+
+        return $"Server={host};Port={port};Database={database};Uid={user};Pwd={password};AllowPublicKeyRetrieval=True;SslMode=Preferred;";
+    }
+}
+
+static string MaskString(string input)
+{
+    if (string.IsNullOrEmpty(input)) return "";
+    if (input.Length <= 2) return "**";
+    return input.Substring(0, 2) + "***";
+}
+
+static void LogDiagnosticConnStrInfo(string connectionString, ILogger logger)
+{
+    try
+    {
+        var builder = new System.Data.Common.DbConnectionStringBuilder { ConnectionString = connectionString };
+        var host = builder.ContainsKey("server") ? builder["server"] : (builder.ContainsKey("host") ? builder["host"] : "unknown");
+        var port = builder.ContainsKey("port") ? builder["port"] : "3306";
+        var db = builder.ContainsKey("database") ? builder["database"] : "unknown";
+        var user = builder.ContainsKey("uid") ? builder["uid"] : (builder.ContainsKey("user") ? builder["user"] : (builder.ContainsKey("user id") ? builder["user id"] : "unknown"));
+
+        logger.LogInformation("Database Config: Connection string loaded (Host: {Host}, Port: {Port}, DB: {Database}, User: {User}).",
+            host, port, db, MaskString(user?.ToString() ?? ""));
+    }
+    catch
+    {
+        logger.LogInformation("Database Config: Connection string loaded.");
+    }
 }
 
 static FileExtensionContentTypeProvider BuildContentTypeProvider()
