@@ -339,40 +339,49 @@ app.Run();
 
 static string GetDatabaseConnectionString(IConfiguration configuration, ILogger logger)
 {
-    // Strategy 1: Check Railway's individual MySQL environment variables
+    // Priority 1: Check MySQL URL environment variables (Railway standard link)
+    var mysqlUrl = configuration["MYSQL_URL"]
+                   ?? configuration["MYSQLPRIVATEURL"]
+                   ?? configuration["MYSQL_PRIVATE_URL"]
+                   ?? configuration["DATABASE_URL"];
+
+    if (!string.IsNullOrWhiteSpace(mysqlUrl) &&
+        (mysqlUrl.StartsWith("mysql://", StringComparison.OrdinalIgnoreCase) ||
+         mysqlUrl.StartsWith("mysqli://", StringComparison.OrdinalIgnoreCase)))
+    {
+        return ParseMysqlUrl(mysqlUrl, logger);
+    }
+
+    // Priority 2: Check Railway's individual MySQL environment variables
     var host = configuration["MYSQLHOST"] ?? configuration["MYSQL_HOST"];
-    var portStr = configuration["MYSQLPORT"] ?? configuration["MYSQL_PORT"] ?? "3306";
+    var portStr = configuration["MYSQLPORT"] ?? configuration["MYSQL_PORT"];
     var user = configuration["MYSQLUSER"] ?? configuration["MYSQL_USER"];
     var password = configuration["MYSQLPASSWORD"] ?? configuration["MYSQL_PASSWORD"];
     var database = configuration["MYSQLDATABASE"] ?? configuration["MYSQL_DATABASE"];
 
     if (!string.IsNullOrWhiteSpace(host) && !string.IsNullOrWhiteSpace(user) && !string.IsNullOrWhiteSpace(database))
     {
-        int port = int.TryParse(portStr, out var p) ? p : 3306;
-        logger.LogInformation("Database Config: Using Railway individual environment variables (Host: {Host}, Port: {Port}, DB: {Database}, User: {User}).",
+        int port = 3306;
+        if (!string.IsNullOrWhiteSpace(portStr) && int.TryParse(portStr.Trim(), out var p) && p > 0)
+        {
+            port = p;
+        }
+
+        logger.LogInformation("Database Config: Using individual environment variables (Host: {Host}, Port: {Port}, DB: {Database}, User: {User}).",
             host, port, database, MaskString(user));
 
         return $"Server={host};Port={port};Database={database};Uid={user};Pwd={password ?? ""};AllowPublicKeyRetrieval=True;SslMode=Preferred;";
     }
 
-    // Strategy 2: Check direct connection string variables
+    // Priority 3: Check direct connection string variables or appsettings.json
     var connStr = configuration.GetConnectionString("DefaultConnection")
                   ?? configuration["MYSQL_CONNECTION_STRING"]
                   ?? configuration["DEFAULT_CONNECTION"]
                   ?? configuration["ConnectionStrings:DefaultConnection"];
 
-    // Strategy 3: Check MySQL URL environment variables
     if (string.IsNullOrWhiteSpace(connStr))
     {
-        connStr = configuration["MYSQL_URL"]
-                  ?? configuration["MYSQLPRIVATEURL"]
-                  ?? configuration["MYSQL_PRIVATE_URL"]
-                  ?? configuration["DATABASE_URL"];
-    }
-
-    if (string.IsNullOrWhiteSpace(connStr))
-    {
-        throw new InvalidOperationException("MySQL connection string is not configured. Please set MYSQLHOST/MYSQLUSER/MYSQLDATABASE, MYSQL_URL, or ConnectionStrings__DefaultConnection.");
+        throw new InvalidOperationException("MySQL connection string is missing. Please configure MYSQL_URL, MYSQLHOST/MYSQLUSER/MYSQLDATABASE, or ConnectionStrings__DefaultConnection.");
     }
 
     if (connStr.StartsWith("mysql://", StringComparison.OrdinalIgnoreCase) ||

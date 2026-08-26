@@ -23,6 +23,26 @@ public class AuthService
     public async Task<AuthResponse> RegisterAsync(
         RegisterRequest request)
     {
+        if (request == null)
+        {
+            throw new ArgumentException("Request body is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Name))
+        {
+            throw new ArgumentException("Name is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Email))
+        {
+            throw new ArgumentException("Email is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Password))
+        {
+            throw new ArgumentException("Password is required.");
+        }
+
         var email = request.Email.Trim().ToLowerInvariant();
 
         if (await _userRepository.EmailExistsAsync(email))
