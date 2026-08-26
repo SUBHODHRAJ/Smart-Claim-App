@@ -33,7 +33,7 @@ builder.Services.AddDbContext<ApplicationDbContext>(
     {
         options.UseMySql(
             connectionString,
-            ServerVersion.AutoDetect(connectionString));
+            new MySqlServerVersion(new Version(8, 0, 36)));
     });
 
 // ============================================================
@@ -226,11 +226,30 @@ var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
     var services = scope.ServiceProvider;
+    var logger = services.GetRequiredService<ILogger<Program>>();
 
-    var dbContext =
-        services.GetRequiredService<ApplicationDbContext>();
-
-    await DbSeeder.SeedAsync(dbContext);
+    int maxRetries = 5;
+    for (int retry = 1; retry <= maxRetries; retry++)
+    {
+        try
+        {
+            logger.LogInformation("Attempting database migration and seeding (Attempt {Retry}/{MaxRetries})...", retry, maxRetries);
+            var dbContext = services.GetRequiredService<ApplicationDbContext>();
+            await DbSeeder.SeedAsync(dbContext);
+            logger.LogInformation("Database migration and seeding completed successfully.");
+            break;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Database migration/seeding attempt {Retry} failed: {Message}", retry, ex.Message);
+            if (retry == maxRetries)
+            {
+                logger.LogError(ex, "All database migration/seeding attempts failed.");
+                throw;
+            }
+            await Task.Delay(3000);
+        }
+    }
 }
 
 // ============================================================
@@ -324,14 +343,14 @@ static string GetDatabaseConnectionString(IConfiguration configuration)
 static string ConvertMysqlUrlToConnectionString(string mysqlUrl)
 {
     var uri = new Uri(mysqlUrl);
-    var userInfo = uri.UserInfo.Split(':');
+    var userInfo = uri.UserInfo.Split(new[] { ':' }, 2);
     var user = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : "";
     var password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
     var host = uri.Host;
     var port = uri.Port > 0 ? uri.Port : 3306;
     var database = uri.AbsolutePath.TrimStart('/');
 
-    return $"Server={host};Port={port};Database={database};Uid={user};Pwd={password};";
+    return $"Server={host};Port={port};Database={database};Uid={user};Pwd={password};AllowPublicKeyRetrieval=True;SslMode=Preferred;";
 }
 
 static FileExtensionContentTypeProvider BuildContentTypeProvider()

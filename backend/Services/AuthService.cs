@@ -77,23 +77,25 @@ public class AuthService
 
     private AuthResponse GenerateAuthResponse(User user)
     {
-        var jwtSettings = _configuration.GetSection("Jwt");
-
-        var key = jwtSettings["Key"]
+        var key = _configuration["JWT_KEY"]
+                  ?? _configuration["JWT_SECRET"]
+                  ?? _configuration["Jwt:Key"]
                   ?? throw new InvalidOperationException(
                       "JWT Key is not configured.");
 
-        var issuer = jwtSettings["Issuer"]
+        var issuer = _configuration["JWT_ISSUER"]
+                     ?? _configuration["Jwt:Issuer"]
                      ?? throw new InvalidOperationException(
                          "JWT Issuer is not configured.");
 
-        var audience = jwtSettings["Audience"]
+        var audience = _configuration["JWT_AUDIENCE"]
+                       ?? _configuration["Jwt:Audience"]
                        ?? throw new InvalidOperationException(
                            "JWT Audience is not configured.");
 
         var expirationMinutes =
             int.TryParse(
-                jwtSettings["ExpirationMinutes"],
+                _configuration["JWT_EXPIRATION_MINUTES"] ?? _configuration["Jwt:ExpirationMinutes"],
                 out var minutes)
                 ? minutes
                 : 120;
