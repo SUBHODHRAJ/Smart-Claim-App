@@ -52,7 +52,7 @@ const resolveImageUrl = (image) => {
         image?.FilePath ??
         "";
 
-  const url = String(raw).trim();
+  let url = String(raw).trim();
   if (!url) return "";
 
   // Already absolute — pass through
@@ -60,7 +60,14 @@ const resolveImageUrl = (image) => {
   if (url.startsWith("blob:") || url.startsWith("data:")) return url;
 
   // Normalise backslashes (Windows paths that leaked through)
-  const normalised = url.replace(/\\/g, "/");
+  let normalised = url.replace(/\\/g, "/");
+
+  // If path starts with /api/uploads, strip /api prefix
+  if (normalised.startsWith("/api/uploads/")) {
+    normalised = normalised.substring(4);
+  } else if (normalised.startsWith("api/uploads/")) {
+    normalised = `/${normalised.substring(4)}`;
+  }
 
   // Ensure leading slash and prepend backend origin
   const withSlash = normalised.startsWith("/") ? normalised : `/${normalised}`;

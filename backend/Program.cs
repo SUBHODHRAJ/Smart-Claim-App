@@ -287,6 +287,23 @@ app.UseStaticFiles(new StaticFileOptions
     ContentTypeProvider = BuildContentTypeProvider(),
 });
 
+var uploadsFolder = Path.Combine(webRootPath, "uploads");
+Directory.CreateDirectory(uploadsFolder);
+
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(uploadsFolder),
+    RequestPath = "/uploads",
+    ContentTypeProvider = BuildContentTypeProvider(),
+});
+
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(uploadsFolder),
+    RequestPath = "/api/uploads",
+    ContentTypeProvider = BuildContentTypeProvider(),
+});
+
 app.UseAuthentication();
 app.UseAuthorization();
 
