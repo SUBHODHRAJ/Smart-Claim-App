@@ -21,6 +21,10 @@ if (!string.IsNullOrWhiteSpace(port))
 {
     builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 }
+else if (!builder.Environment.IsDevelopment())
+{
+    builder.WebHost.UseUrls("http://0.0.0.0:8080");
+}
 
 // ============================================================
 // DATABASE
@@ -230,11 +234,14 @@ builder.Services.AddSwaggerGen(options =>
 var app = builder.Build();
 
 // ============================================================
-// DATABASE SEEDING & MIGRATION WITH RETRY
+// ASYNC DATABASE SEEDING & MIGRATION WITH RETRY
+// Non-blocking background initialization so Kestrel starts
+// listening on TCP port 0.0.0.0 immediately.
 // ============================================================
 
-using (var scope = app.Services.CreateScope())
+_ = Task.Run(async () =>
 {
+    using var scope = app.Services.CreateScope();
     var services = scope.ServiceProvider;
     var logger = services.GetRequiredService<ILogger<Program>>();
 
@@ -256,7 +263,7 @@ using (var scope = app.Services.CreateScope())
             logger.LogWarning(ex, "Database migration/seeding attempt {Retry}/{MaxRetries} failed: {Message}", retry, maxRetries, ex.Message);
             if (retry == maxRetries)
             {
-                logger.LogError(ex, "All {MaxRetries} database migration/seeding attempts failed. Startup will continue so health endpoints are accessible.", maxRetries);
+                logger.LogError(ex, "All {MaxRetries} database migration/seeding attempts failed. Application will continue serving requests.", maxRetries);
             }
             else
             {
@@ -265,7 +272,7 @@ using (var scope = app.Services.CreateScope())
             }
         }
     }
-}
+});
 
 // ============================================================
 // MIDDLEWARE ORDER (ORDER MATTERS)
